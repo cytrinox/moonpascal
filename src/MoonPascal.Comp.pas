@@ -8,8 +8,8 @@ unit MoonPascal.Comp;
   originally written by Dennis D. Spreen - but uses a different approach to
   realise dynamic generation of Delphi interfaces for Lua.
   It has improved support for registering delphi class and object methods,
-  support for Lua namespaces (multiple sublevels) and automatically mapping
-  of enumeration types.
+  support for Lua namespaces (multiple sublevels), automatically mapping
+  of enumeration types and garbage collection.
 
 
   LICENSE
@@ -53,11 +53,6 @@ type
   ELuaLibraryLoadError = class(Exception);
   ELuaLibraryMethodNotFound = class(Exception);
 
-
-  TMoonPascalManagedInstance = record
-    FObject: Pointer;
-  end;
-
   TMoonPascal = class(TObject)
   private
     FLuaState    : Lua_State;
@@ -87,12 +82,13 @@ type
     function DoCall(L: Lua_State; NArg, NRes: Integer): Integer; virtual;
     function LoadFile(Filename: String): Integer; virtual;
     function Run: Integer; virtual;
+    procedure ResetLuaState; virtual;
 
     procedure PushUserData(APointer: TObject; const AMetaID: string); overload; virtual;
-    class procedure PushUserData(L: Lua_state; APointer: TObject; const AMetaID: string); overload; virtual;
+    class procedure PushUserData(L: Lua_State; APointer: TObject; const AMetaID: string); overload; virtual;
 
     procedure PushLightUserData(APointer: TObject; const AMetaID: string); overload; virtual;
-    class procedure PushLightUserData(L: Lua_state; APointer: TObject; const AMetaID: string); overload; virtual;
+    class procedure PushLightUserData(L: Lua_State; APointer: TObject; const AMetaID: string); overload; virtual;
 
     { Register various types of functions, methods and types }
     class procedure RegisterMethod(L: Lua_State; Data: Pointer; Code: Pointer; FuncName: String; ANamespace: array of String); overload; virtual;
@@ -147,6 +143,12 @@ implementation
 
 type
   TLuaProc = function(L: Lua_State): Integer of object;
+
+  TManagedInstance = record
+    FObject: TObject;
+  end;
+
+  PManagedInstance = ^TManagedInstance;
 
 var
   { Unit global var for the Link Library handle }
@@ -218,15 +220,36 @@ var
   ObjPtr    : TObject;
   Marshall  : TMarshaller;
 begin
-  MethodName   := String(lua_tostring(L, lua_upvalueindex(1))); // method name
-  ClassName    := String(lua_tostring(L, lua_upvalueindex(2))); // class name
-  ObjPtr       := luaL_checkudata(L, -1, Marshall.AsAnsi(ClassName).ToPointer);
-  Routine.Data := ObjPtr;
-  Routine.Code := ObjPtr.MethodAddress(MethodName);
-  Assert(Routine.Code <> nil);
+  MethodName := String(lua_tostring(L, lua_upvalueindex(1))); // method name
+  ClassName  := String(lua_tostring(L, lua_upvalueindex(2))); // class name
+  ObjPtr     := luaL_checkudata(L, -1, Marshall.AsAnsi(ClassName).ToPointer);
+
+  if lua_islightuserdata(L, -1) then
+  begin
+    Routine.Data := ObjPtr;
+    Routine.Code := ObjPtr.MethodAddress(MethodName);
+    Assert(Routine.Code <> nil);
+  end
+  else
+  begin
+    Routine.Data := PManagedInstance(ObjPtr)^.FObject;
+    Routine.Code := PManagedInstance(ObjPtr)^.FObject.MethodAddress(MethodName);
+    Assert(Routine.Code <> nil);
+  end;
 
   // Call object function
   Result := TLuaProc(Routine)(L);
+end;
+
+function gc(L: Lua_State): Integer; cdecl;
+var
+  ObjPtr: TObject;
+begin
+  if not lua_islightuserdata(L, -1) then
+  begin
+    ObjPtr := lua_touserdata(L, -1);
+    PManagedInstance(ObjPtr)^.FObject.Free;
+  end;
 end;
 
 { **** CLASS METHODS **** }
@@ -373,7 +396,7 @@ begin
   PushLightUserData(self.LuaState, APointer, AMetaID);
 end;
 
-class procedure TMoonPascal.PushLightUserData(L: Lua_state; APointer: TObject; const AMetaID: string);
+class procedure TMoonPascal.PushLightUserData(L: Lua_State; APointer: TObject; const AMetaID: string);
 var
   Marshall: TMarshaller;
 begin
@@ -386,14 +409,14 @@ begin
   PushUserData(self.LuaState, APointer, AMetaID);
 end;
 
-class procedure TMoonPascal.PushUserData(L: Lua_state; APointer: TObject; const AMetaID: string);
+class procedure TMoonPascal.PushUserData(L: Lua_State; APointer: TObject; const AMetaID: string);
 var
-  Marshall: TMarshaller;
-  LManagedData: ^TMoonPascalManagedInstance;
+  Marshall    : TMarshaller;
+  LManagedData: PManagedInstance;
 begin
-  LManagedData := lua_newuserdata(L, sizeof(TMoonPascalManagedInstance));
+  LManagedData          := lua_newuserdata(L, sizeof(PManagedInstance));
   LManagedData^.FObject := APointer;
-  //lua_pushlightuserdata(L, Pointer(APointer));
+  // lua_pushlightuserdata(L, Pointer(APointer));
   luaL_setmetatable(L, Marshall.AsAnsi(AMetaID).ToPointer);
 end;
 
@@ -426,6 +449,15 @@ begin
   RegisterType(self.LuaState, AClass, ATypeName);
 end;
 
+procedure TMoonPascal.ResetLuaState;
+begin
+  if self.Active then
+  begin
+    self.Close;
+    self.Open;
+  end;
+end;
+
 class procedure TMoonPascal.RegisterType(L: Lua_State; AClass: TClass; ATypeName: string);
 var
   LContext: TRttiContext;
@@ -440,6 +472,9 @@ begin
     luaL_newmetatable(L, Marshall.AsAnsi(ATypeName).ToPointer);
     lua_pushvalue(L, -1);
     lua_setfield(L, -2, '__index');
+
+    lua_pushcfunction(L, gc);
+    lua_setfield(L, -2, '__gc');
 
     LType := LContext.GetType(AClass);
     for LMethod in LType.GetMethods do
