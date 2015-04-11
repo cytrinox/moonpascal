@@ -48,6 +48,7 @@ uses
 
 type
   TOnLuaPrint = TGetStrProc;
+  TOnLuaCreate = TNotifyEvent;
 
   ELuaLibraryNotFound = class(Exception);
   ELuaLibraryLoadError = class(Exception);
@@ -57,6 +58,7 @@ type
   private
     FLuaState    : Lua_State;
     FOnPrint     : TOnLuaPrint;
+    FOnCreate    : TOnLuaCreate;
     FScriptPath  : String;
     FAutoRegister: boolean;
     FActive      : boolean;
@@ -73,7 +75,9 @@ type
     destructor Destroy; override;
     procedure Open; virtual;
     procedure Close; virtual;
+    procedure DoStateInit; virtual;
     class procedure LoadLuaLibrary(const ALibraryPath: String); virtual;
+
 
     { Load and/or run Lua code }
     function RunFile(Filename: String): Integer; virtual;
@@ -98,6 +102,9 @@ type
     class procedure RegisterClassFunction(L: Lua_State; AObject: TObject; FuncName: String; ANamespace: array of String); overload; virtual;
     class procedure RegisterType(L: Lua_State; AClass: TClass; ATypeName: string); overload; virtual;
     class procedure RegisterEnum(L: Lua_State; ATypeInfo: PTypeInfo; ANamespace: array of string; AModifier: TFunc<String, String>); overload; virtual;
+    class procedure RegisterStringValue(L: Lua_State; const AName, AValue: String; ANamespace: array of string); overload; virtual;
+    class procedure RegisterIntegerValue(L: Lua_State; const AName: String; AValue: Integer; ANamespace: array of string); overload; virtual;
+    class procedure RegisterBooleanValue(L: Lua_State; const AName: String; AValue: Boolean; ANamespace: array of string); overload; virtual;
 
     procedure RegisterMethod(AObject: TObject; FuncName: String; ANamespace: array of String); overload; virtual;
     procedure RegisterStaticFunction(AEntryPoint: Pointer; FuncName: String; ANamespace: array of String); overload; virtual;
@@ -105,6 +112,9 @@ type
     procedure RegisterClassFunction(AObject: TObject; FuncName: String; ANamespace: array of String); overload; virtual;
     procedure RegisterType(AClass: TClass; ATypeName: string = ''); overload; virtual;
     procedure RegisterEnum(ATypeInfo: PTypeInfo; ANamespace: array of string; AModifier: TFunc<String, String> = nil); overload; virtual;
+    procedure RegisterStringValue(const AName, AValue: String; ANamespace: array of string); overload; virtual;
+    procedure RegisterIntegerValue( const AName: String; AValue: Integer; ANamespace: array of string); overload; virtual;
+    procedure RegisterBooleanValue( const AName: String; AValue: Boolean; ANamespace: array of string); overload; virtual;
 
     { Register all published methods and functions from class or object instance }
     class procedure RegisterAll(L: Lua_State; AClass: TClass; ANamespace: array of String); overload; virtual;
@@ -130,6 +140,7 @@ type
     { Properties }
     property LuaState: Lua_State read FLuaState write FLuaState;
     property OnPrint: TOnLuaPrint read FOnPrint write FOnPrint;
+    property OnCreate: TOnLuaCreate read FOnCreate write FOnCreate;
     property ScriptPath: String read FScriptPath write FScriptPath;
     property AutoRegister: boolean read FAutoRegister write FAutoRegister;
     property Active: boolean read FActive;
@@ -266,6 +277,8 @@ end;
 constructor TMoonPascal.Create;
 begin
   FAutoRegister := True;
+  if Assigned(self.FOnCreate) then
+    self.FOnCreate(self);
 end;
 
 destructor TMoonPascal.Destroy;
@@ -290,6 +303,8 @@ begin
 
   // Override print method
   RegisterMethod(LuaState, self, self.MethodAddress('print'), 'print', []);
+
+  self.DoStateInit;
 end;
 
 procedure TMoonPascal.Close;
@@ -373,6 +388,11 @@ begin
     FOnPrint(Msg)
   else
     ShowMessage(Msg);
+end;
+
+procedure TMoonPascal.DoStateInit;
+begin
+  // nothing to do, derived class can register custom data by overriding this method.
 end;
 
 function TMoonPascal.RunString(Value: String): Integer;
@@ -796,6 +816,130 @@ begin
   end;
 end;
 
+
+class procedure TMoonPascal.RegisterIntegerValue(L: Lua_State; const AName: String; AValue: Integer; ANamespace: array of string);
+var
+  I         : Integer;
+  Marshall  : TMarshaller;
+  E         : Integer;
+  LStackSize: Integer;
+begin
+  LStackSize := lua_gettop(L);
+  lua_pushglobaltable(L); // starting from global
+  for I := Low(ANamespace) to High(ANamespace) do
+  begin
+    lua_pushstring(L, Marshall.AsAnsi(ANamespace[I]).ToPointer);
+    E := lua_gettable(L, -1);
+    case E of
+      LUA_TTABLE:
+        ;
+      // nothing to do, next table is on top of stack
+      LUA_TNIL:
+        begin
+          // remove nil table first
+          lua_pop(L, 1);
+          // create new table
+          lua_newtable(L);
+          lua_pushstring(L, Marshall.AsAnsi(ANamespace[I]).ToPointer);
+          lua_pushvalue(L, -2); // dup table ref
+          lua_settable(L, -4);  // set in previous table
+          // now new table is on top
+        end
+    else
+      raise Exception.CreateFmt('The table for namespace %s is of invalid type', [ANamespace[I]]);
+    end;
+  end;
+  luaL_checktype(L, -1, LUA_TTABLE);
+
+  // set value
+  lua_pushinteger(L, AValue);
+  lua_setfield(L, -2, Marshall.AsAnsi(AName).ToPointer);
+
+  lua_settop(L, LStackSize);
+end;
+
+
+class procedure TMoonPascal.RegisterStringValue(L: Lua_State; const AName, AValue: String; ANamespace: array of string);
+var
+  I         : Integer;
+  Marshall  : TMarshaller;
+  E         : Integer;
+  LStackSize: Integer;
+begin
+  LStackSize := lua_gettop(L);
+  lua_pushglobaltable(L); // starting from global
+  for I := Low(ANamespace) to High(ANamespace) do
+  begin
+    lua_pushstring(L, Marshall.AsAnsi(ANamespace[I]).ToPointer);
+    E := lua_gettable(L, -1);
+    case E of
+      LUA_TTABLE:
+        ;
+      // nothing to do, next table is on top of stack
+      LUA_TNIL:
+        begin
+          // remove nil table first
+          lua_pop(L, 1);
+          // create new table
+          lua_newtable(L);
+          lua_pushstring(L, Marshall.AsAnsi(ANamespace[I]).ToPointer);
+          lua_pushvalue(L, -2); // dup table ref
+          lua_settable(L, -4);  // set in previous table
+          // now new table is on top
+        end
+    else
+      raise Exception.CreateFmt('The table for namespace %s is of invalid type', [ANamespace[I]]);
+    end;
+  end;
+  luaL_checktype(L, -1, LUA_TTABLE);
+
+  // set value
+  lua_pushstring(L, Marshall.AsAnsi(AValue).ToPointer);
+  lua_setfield(L, -2, Marshall.AsAnsi(AName).ToPointer);
+
+  lua_settop(L, LStackSize);
+end;
+class procedure TMoonPascal.RegisterBooleanValue(L: Lua_State; const AName: string; AValue: Boolean; ANamespace: array of string);
+var
+  I         : Integer;
+  Marshall  : TMarshaller;
+  E         : Integer;
+  LStackSize: Integer;
+begin
+  LStackSize := lua_gettop(L);
+  lua_pushglobaltable(L); // starting from global
+  for I := Low(ANamespace) to High(ANamespace) do
+  begin
+    lua_pushstring(L, Marshall.AsAnsi(ANamespace[I]).ToPointer);
+    E := lua_gettable(L, -1);
+    case E of
+      LUA_TTABLE:
+        ;
+      // nothing to do, next table is on top of stack
+      LUA_TNIL:
+        begin
+          // remove nil table first
+          lua_pop(L, 1);
+          // create new table
+          lua_newtable(L);
+          lua_pushstring(L, Marshall.AsAnsi(ANamespace[I]).ToPointer);
+          lua_pushvalue(L, -2); // dup table ref
+          lua_settable(L, -4);  // set in previous table
+          // now new table is on top
+        end
+    else
+      raise Exception.CreateFmt('The table for namespace %s is of invalid type', [ANamespace[I]]);
+    end;
+  end;
+  luaL_checktype(L, -1, LUA_TTABLE);
+
+  // set value
+  lua_pushboolean(L, Integer(AValue));
+  lua_setfield(L, -2, Marshall.AsAnsi(AName).ToPointer);
+
+  lua_settop(L, LStackSize);
+end;
+
 function TMoonPascal.LoadFile(Filename: String): Integer;
 var
   Marshall: TMarshaller;
@@ -1035,6 +1179,13 @@ begin
   RegisterEnum(self.LuaState, ATypeInfo, ANamespace, AModifier);
 end;
 
+
+
+procedure TMoonPascal.RegisterIntegerValue(const AName: String; AValue: Integer; ANamespace: array of string);
+begin
+  RegisterIntegerValue(self.LuaState, AName, AValue, ANamespace);
+end;
+
 procedure TMoonPascal.RegisterClassFunction(AClass: TClass; FuncName: string; ANamespace: array of String);
 begin
   RegisterClassFunction(self.LuaState, AClass, FuncName, ANamespace);
@@ -1044,6 +1195,12 @@ procedure TMoonPascal.RegisterStaticFunction(AEntryPoint: Pointer; FuncName: Str
 begin
   RegisterStaticFunction(self.LuaState, AEntryPoint, FuncName, ANamespace);
 end;
+
+procedure TMoonPascal.RegisterStringValue(const AName, AValue: String; ANamespace: array of string);
+begin
+  RegisterStringValue(self.LuaState, AName, AValue, ANamespace);
+end;
+
 
 class procedure TMoonPascal.RegisterClassFunction(L: Lua_State; AObject: TObject; FuncName: String; ANamespace: array of String);
 begin
@@ -1069,6 +1226,13 @@ procedure TMoonPascal.RegisterAll(AObject: TObject; ANamespace: array of String)
 begin
   RegisterAll(LuaState, AObject, ANamespace);
 end;
+
+procedure TMoonPascal.RegisterBooleanValue(const AName: String; AValue: Boolean; ANamespace: array of string);
+begin
+  RegisterBooleanValue(self.LuaState, AName, AValue, ANamespace);
+end;
+
+
 
 procedure TMoonPascal.RegisterPackage(PackageName: String; AObject: TObject);
 begin
