@@ -156,8 +156,13 @@ var
 
   { **** LOCAL FUNCTIONS AND HELPERS **** }
 
-  // This function is called by Lua, it extracts the object by
-  // pointer to the objects method by name, which is then called.
+procedure DebugString(const AMsg: string; const AValues: array of const);
+begin
+  OutputDebugString(PWideChar(Format(AMsg, AValues)));
+end;
+
+// This function is called by Lua, it extracts the object by
+// pointer to the objects method by name, which is then called.
 function LuaCallBack(L: Lua_State): Integer; cdecl;
 var
   LRoutine: TMethod; // Code and Data for the call back method
@@ -245,9 +250,13 @@ function gc(L: Lua_State): Integer; cdecl;
 var
   ObjPtr: TObject;
 begin
+  Result := 0;
   if not lua_islightuserdata(L, -1) then
   begin
     ObjPtr := lua_touserdata(L, -1);
+{$IFDEF DEBUG}
+    DebugString('Invoked __gc() for object at 0x%x', [Integer(Pointer(PManagedInstance(ObjPtr)^.FObject))]);
+{$ENDIF}
     PManagedInstance(ObjPtr)^.FObject.Free;
   end;
 end;
@@ -418,6 +427,9 @@ begin
   LManagedData^.FObject := APointer;
   // lua_pushlightuserdata(L, Pointer(APointer));
   luaL_setmetatable(L, Marshall.AsAnsi(AMetaID).ToPointer);
+{$IFDEF DEBUG}
+  DebugString('New managed object: 0x%x', [Integer(Pointer(APointer))]);
+{$ENDIF}
 end;
 
 class function TMoonPascal.ValidMethod(Method: TRttiMethod): boolean;
@@ -494,6 +506,9 @@ begin
       end;
     end;
     lua_pop(L, -1);
+{$IFDEF DEBUG}
+    DebugString('New metatype "%s" => %s registered', [ATypeName, AClass.ClassName]);
+{$ENDIF}
   finally
     LContext.Free;
   end;
