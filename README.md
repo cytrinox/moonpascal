@@ -9,6 +9,12 @@ support for Lua namespaces (multiple sublevels), automatically mapping
 of enumeration types and garbage collection.
 
 
+# Supported Delphi versions
+
+ * Delphi XE5
+ * Delphi XE6
+ * Delphi XE7 
+
 # Copyright
 
 Copyright (c) 2015 Daniel Vogelbacher <daniel@vogelbacher.name>
